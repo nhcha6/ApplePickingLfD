@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 import pickle
+from os import listdir
+from os.path import isfile, join
 
 def calculate_weighted_centre(current_pos, point_cloud, goal_pos, goal_flag=False):
     # extract the repulsive vector from the point cloud data
@@ -121,11 +123,12 @@ def generate_test_data(file_name, take_every=3):
     return x, y
 
 
-def generate_train_data(file, take_every=3):
+def generate_train_data(folder, file, take_every=3, points = False):
+    print(file)
     # read in trajectory df and intialise x and y
-    traj_df = pd.read_pickle('trajectory data/' + file + '.pkl')
-    goal_df = pd.read_pickle('trajectory data/' + file + '_goal.pkl')
-    point_cloud_df = pd.read_pickle('trajectory data/' + file + '_point_cloud.pkl')
+    traj_df = pd.read_pickle(folder + file + '.pkl')
+    goal_df = pd.read_pickle(folder + file + '_goal.pkl')
+    point_cloud_df = pd.read_pickle(folder + file + '_point_cloud.pkl')
     # update point cloud data
     point_cloud = []
     for index, row in point_cloud_df.iterrows():
@@ -157,27 +160,34 @@ def generate_train_data(file, take_every=3):
             repulsive_goal = np.subtract(ee_pos, repulsive_goal)
             repulsive_closest = np.subtract(ee_pos, repulsive_closest)
 
-            # normalise each one
-            attractive_norm = norm_vector(attractive)
-            repulsive_ee_norm = norm_vector(repulsive_ee)
-            repulsive_goal_norm = norm_vector(repulsive_goal)
-            repulsive_closest_norm = norm_vector(repulsive_closest)
+            if not points:
+                # normalise each one
+                attractive_norm = norm_vector(attractive)
+                repulsive_ee_norm = norm_vector(repulsive_ee)
+                repulsive_goal_norm = norm_vector(repulsive_goal)
+                repulsive_closest_norm = norm_vector(repulsive_closest)
+            else:
+                print('points')
+                attractive_norm = attractive
+                repulsive_ee_norm = repulsive_ee
+                repulsive_goal_norm = repulsive_goal
+                repulsive_closest_norm = repulsive_closest
 
-            print('\n')
-            print("attractive")
-            print(attractive)
-            print(attractive_norm)
-            print('repulsive_ee')
-            print(repulsive_ee)
-            print(repulsive_ee_norm)
-            print('repulsive_goal')
-            print(repulsive_goal)
-            print(repulsive_goal_norm)
-            print('repulsive_closest')
-            print(repulsive_closest)
-            print(repulsive_closest_norm)
-            print('motion')
-            print(motion)
+            # print('\n')
+            # print("attractive")
+            # print(attractive)
+            # print(attractive_norm)
+            # print('repulsive_ee')
+            # print(repulsive_ee)
+            # print(repulsive_ee_norm)
+            # print('repulsive_goal')
+            # print(repulsive_goal)
+            # print(repulsive_goal_norm)
+            # print('repulsive_closest')
+            # print(repulsive_closest)
+            # print(repulsive_closest_norm)
+            # print('motion')
+            # print(motion)
 
             # alternative, can use the points instead of the normalised attractive and repulsive vectors
             args = (attractive_norm, repulsive_ee_norm, repulsive_goal_norm, repulsive_closest_norm)
@@ -211,11 +221,22 @@ def generate_train_data(file, take_every=3):
 
     return x, y
 
-def save_train_data(recorded_data, file_name):
+def save_train_data(recorded_data, save_name, points = False):
     x = []
     y = []
-    for file_name in recorded_data:
-        x_traj, y_traj = generate_train_data(file_name)
+    onlyfiles = [f for f in listdir(recorded_data) if isfile(join(recorded_data, f))]
+
+    i=0
+    for file_name in onlyfiles:
+        # get only trajectory file name
+        if 'goal' in file_name:
+            continue
+        if 'point_cloud' in file_name:
+            continue
+
+        print(i)
+        i+=1
+        x_traj, y_traj = generate_train_data(recorded_data, file_name[0:-4], points=points)
         x.extend(x_traj)
         y.extend(y_traj)
 
@@ -224,9 +245,9 @@ def save_train_data(recorded_data, file_name):
     print(x.shape)
     print(y.shape)
 
-    with open('model data/x_' + file_name + '.pkl', 'wb') as f:
+    with open('model data/x_' + save_name + '.pkl', 'wb') as f:
         pickle.dump(x, f)
-    with open('model data/y_' + file_name + '.pkl', 'wb') as f:
+    with open('model data/y_' + save_name + '.pkl', 'wb') as f:
         pickle.dump(y, f)
 
 def save_test_data(recorded_data, file_name):

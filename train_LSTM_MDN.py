@@ -70,6 +70,7 @@ def build_model(x_train, y_train, epochs, batch_size, neurons):
     inputs = Input(shape=(n_timesteps, n_features))
 
     lstm_1 = LSTM(neurons, activation='relu', kernel_initializer=Orthogonal())
+    # lstm_1 = Dense(neurons, activation='relu')
     h1 = lstm_1(inputs)
 
     alphas = Dense(components, activation="softmax", name="alphas")(h1)
@@ -158,107 +159,135 @@ def swept_error_area(real_traj, generated_traj):
 
     return total_area
 
-def train_test_model():
+def test_trajectory(folder_name, model, input_shape):
+        onlyfiles = [f for f in listdir(folder_name) if isfile(join(folder_name, f))]
+        # onlyfiles = ['test_2']
+        for file_name in onlyfiles:
+            # get only trajectory file name
+            if 'goal' in file_name:
+                continue
+            if 'point_cloud' in file_name:
+                continue
+            file_name = file_name[0:-4]
+            # import trajectory and environment information
+            traj_df = pd.read_pickle(folder_name + file_name + '.pkl')
+            goal_df = pd.read_pickle(folder_name + file_name + '_goal.pkl')
+            point_cloud_df = pd.read_pickle(folder_name + file_name + '_point_cloud.pkl')
+
+            swept_error_area(traj_df['traj'].values, [[-0.010148664005100727, 0.2371896654367447, 0.8040667772293091],
+                                                      [-0.035649736411869526, 0.20717388950288296, 0.7706105895340443],
+                                                      [-0.06376057211309671, 0.20026960968971252, 0.7584957601502538],
+                                                      [-0.09912641439586878, 0.18019162118434906, 0.7405795166268945],
+                                                      [-0.09966458415146917, 0.11886832118034363, 0.6899319188669324],
+                                                      [-0.06884158251341432, 0.14230557531118393, 0.6528893345966935],
+                                                      [-0.04095121507998556, 0.04624660313129425, 0.6590271648019552],
+                                                      [-0.012194389826618135, -0.022728487849235535,
+                                                       0.6512554995715618],
+                                                      [0.014337816857732832, -0.024133998900651932, 0.6630082409828901],
+                                                      [0.026575917028822005, -0.04136800393462181, 0.6809714715927839],
+                                                      [0.055449640029110014, -0.07100438885390759, 0.6672618836164474],
+                                                      [0.06397608353290707, -0.06987248547375202, 0.7011527009308338],
+                                                      [0.10822953714523464, -0.10554221458733082, 0.7032382795587182],
+                                                      [0.1528710393467918, -0.1082378439605236, 0.6706166164949536],
+                                                      [0.18061221262905747, -0.09485810715705156, 0.6850726818665862],
+                                                      [0.21182763820979744, -0.13104575965553522, 0.7155462997034192]])
+
+            # convert to usable form
+            point_cloud = []
+            for index, row in point_cloud_df.iterrows():
+                point_cloud.append([row[0], row[1], row[2]])
+            goal = [goal_df.iloc[0, 0], goal_df.iloc[1, 0], goal_df.iloc[2, 0]]
+
+            point_list = []
+            for i in range(3):
+                current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7], traj_df.iloc[0]['traj'][11]]
+                input_data = np.zeros((1, 20, input_shape[2]))
+                distances = []
+                points = [current_pos]
+                # while True:
+                for i in range(30):
+                    # calculate input vector for this timestep
+                    input_vector = calulate_input_vector(current_pos, point_cloud, goal)
+
+                    # update input vector
+                    shape = input_data.shape
+                    input_data = np.delete(input_data, [i for i in range(12)])
+                    input_data = np.append(input_data, input_vector)
+                    input_data = input_data.reshape((shape[0], shape[1], shape[2]))
+
+                    # make prediction
+                    pred = model.predict(input_data)
+                    parameter_vector = pred[0]
+
+                    # extract sample from generated probability distribution
+                    alpha = parameter_vector[0:components]
+                    mu = parameter_vector[components:components * (1 + no_dimensions)]
+                    mu = tf.reshape(mu, (components, no_dimensions))
+                    sigma = parameter_vector[components * (1 + no_dimensions):components * (2 + 2 * no_dimensions)]
+                    sigma = tf.reshape(sigma, (components, no_dimensions))
+
+                    gm = tfd.MixtureSameFamily(
+                        mixture_distribution=tfd.Categorical(probs=alpha),
+                        components_distribution=tfd.MultivariateNormalDiag(loc=mu,
+                                                                           scale_diag=sigma))
+
+                    delta_pos = gm.sample([1])[0].numpy()
+                    new_pos = np.add(current_pos, delta_pos)
+                    print('\n')
+                    print(delta_pos)
+                    print(current_pos)
+                    print(new_pos)
+                    print(goal)
+
+                    dist = np.linalg.norm(np.subtract(new_pos, goal))
+                    print(dist)
+                    distances.append(dist)
+
+                    # restart criteria for a bad run
+                    # if np.linalg.norm(delta_pos)>0.2:
+                    # if dist > 1.5:
+                    #     current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7],
+                    #                    traj_df.iloc[0]['traj'][11]]
+                    #     points = [current_pos]
+                    #     continue
+
+                    # do not allow excessively large changes in ee pos
+                    if np.linalg.norm(delta_pos) > max_movement:
+                        continue
+
+                    current_pos = new_pos
+                    points.append(list(current_pos))
+
+                    # termination criteria: distance to goal
+                    if dist < stop_distance:
+                        break
+
+                point_list.append(points)
+            # analyse results
+            # plt.figure()
+            # plt.plot(distances)
+
+            fig = plt.figure()
+            ax = fig.add_subplot(projection='3d')
+            ax.plot([p[0] for p in point_cloud], [p[1] for p in point_cloud],[p[2] for p in point_cloud], 'bo', markersize=2, alpha=0.2)
+            for points in point_list:
+                error = swept_error_area(traj_df['traj'].values, points)
+                ax.plot([p[0] for p in points], [p[1] for p in points], [p[2] for p in points], label=str(error))
+            ax.plot([-p[3] for p in traj_df['traj']], [-p[7] for p in traj_df['traj']],
+                    [p[11] for p in traj_df['traj']], 'y', linewidth=4, label='demonstration')
+            ax.plot([goal[0]], [goal[1]], [goal[2]], 'go')
+            plt.legend()
+            plt.show()
+
+def train_test_model(data_name):
     ############ train model ###########
-    train_x, train_y = read_data('train_single_sample')
+    train_x, train_y = read_data(data_name)
     print(train_x.shape)
     print(train_y.shape)
 
-    model = build_model(train_x, train_y, epochs = 30, batch_size=8, neurons=50)
+    model = build_model(train_x, train_y, epochs = 50, batch_size=32, neurons=200)
 
     ############ TEST MODEL ##############
-    for file_name in ['test_2']:
-        # import trajectory and environment information
-        traj_df = pd.read_pickle('trajectory data/' + file_name + '.pkl')
-        goal_df = pd.read_pickle('trajectory data/' + file_name + '_goal.pkl')
-        point_cloud_df = pd.read_pickle('trajectory data/' + file_name + '_point_cloud.pkl')
-
-        swept_error_area(traj_df['traj'].values, [[-0.010148664005100727, 0.2371896654367447, 0.8040667772293091], [-0.035649736411869526, 0.20717388950288296, 0.7706105895340443], [-0.06376057211309671, 0.20026960968971252, 0.7584957601502538], [-0.09912641439586878, 0.18019162118434906, 0.7405795166268945], [-0.09966458415146917, 0.11886832118034363, 0.6899319188669324], [-0.06884158251341432, 0.14230557531118393, 0.6528893345966935], [-0.04095121507998556, 0.04624660313129425, 0.6590271648019552], [-0.012194389826618135, -0.022728487849235535, 0.6512554995715618], [0.014337816857732832, -0.024133998900651932, 0.6630082409828901], [0.026575917028822005, -0.04136800393462181, 0.6809714715927839], [0.055449640029110014, -0.07100438885390759, 0.6672618836164474], [0.06397608353290707, -0.06987248547375202, 0.7011527009308338], [0.10822953714523464, -0.10554221458733082, 0.7032382795587182], [0.1528710393467918, -0.1082378439605236, 0.6706166164949536], [0.18061221262905747, -0.09485810715705156, 0.6850726818665862], [0.21182763820979744, -0.13104575965553522, 0.7155462997034192]])
-
-        # convert to usable form
-        point_cloud = []
-        for index, row in point_cloud_df.iterrows():
-            point_cloud.append([row[0], row[1], row[2]])
-        goal = [goal_df.iloc[0, 0], goal_df.iloc[1, 0], goal_df.iloc[2, 0]]
-
-        point_list = []
-        for i in range(3):
-            current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7], traj_df.iloc[0]['traj'][11]]
-            input_data = np.zeros((1, 20, train_x.shape[2]))
-            distances = []
-            points = [current_pos]
-            # while True:
-            for i in range(30):
-                # calculate input vector for this timestep
-                input_vector = calulate_input_vector(current_pos, point_cloud, goal)
-
-                # update input vector
-                shape = input_data.shape
-                input_data = np.delete(input_data, [i for i in range(12)])
-                input_data = np.append(input_data, input_vector)
-                input_data = input_data.reshape((shape[0], shape[1], shape[2]))
-
-                # make prediction
-                pred = model.predict(input_data)
-                parameter_vector = pred[0]
-
-                # extract sample from generated probability distribution
-                alpha = parameter_vector[0:components]
-                mu = parameter_vector[components:components * (1 + no_dimensions)]
-                mu = tf.reshape(mu, (components, no_dimensions))
-                sigma = parameter_vector[components * (1 + no_dimensions):components * (2 + 2 * no_dimensions)]
-                sigma = tf.reshape(sigma, (components, no_dimensions))
-
-                gm = tfd.MixtureSameFamily(
-                    mixture_distribution=tfd.Categorical(probs=alpha),
-                    components_distribution=tfd.MultivariateNormalDiag(loc=mu,
-                                                                       scale_diag=sigma))
-
-                delta_pos = gm.sample([1])[0].numpy()
-                new_pos = np.add(current_pos, delta_pos)
-                print('\n')
-                print(delta_pos)
-                print(current_pos)
-                print(new_pos)
-                print(goal)
-
-                dist = np.linalg.norm(np.subtract(new_pos, goal))
-                print(dist)
-                distances.append(dist)
-
-                # restart criteria for a bad run
-                # if np.linalg.norm(delta_pos)>0.2:
-                # if dist > 1.5:
-                #     current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7],
-                #                    traj_df.iloc[0]['traj'][11]]
-                #     points = [current_pos]
-                #     continue
-
-                # do not allow excessively large changes in ee pos
-                if np.linalg.norm(delta_pos) > max_movement:
-                    continue
-
-                current_pos = new_pos
-                points.append(list(current_pos))
-
-                # termination criteria: distance to goal
-                if dist < stop_distance:
-                    break
-
-            point_list.append(points)
-        # analyse results
-        # plt.figure()
-        # plt.plot(distances)
-
-
-        fig = plt.figure()
-        ax = fig.add_subplot(projection='3d')
-        for points in point_list:
-            error = swept_error_area(traj_df['traj'].values, points)
-            ax.plot([p[0] for p in points], [p[1] for p in points], [p[2] for p in points], label = str(error))
-        ax.plot([-p[3] for p in traj_df['traj']], [-p[7] for p in traj_df['traj']], [p[11] for p in traj_df['traj']], 'y', linewidth = 4, label='demonstration')
-        ax.plot([goal[0]], [goal[1]], [goal[2]], 'go')
-        plt.legend()
-        plt.show()
+    test_trajectory('trajectory data/', model, train_x.shape)
 
 
