@@ -4,19 +4,22 @@ from tensorflow.keras import Model
 from tensorflow.keras.optimizers import Adam
 import tensorflow as tf
 from tensorflow_probability import distributions as tfd
+from tensorflow.keras.callbacks import ModelCheckpoint
+from tensorflow.keras import models
+from random import randint
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 import pandas as pd
 import pickle
 from create_model_data import *
 from matplotlib import pyplot as plt
+import csv
 
-components = 4  # Number of components in the mixture
 no_parameters = 3  # Paramters of the mixture (alpha, mu, sigma)
 no_dimensions = 3  # Dimensions of output distribution (x, y, z)
 
 max_movement = 0.4
-stop_distance = 0.4
+stop_distance = 0.35
 
 def read_data(file_name_train):
     with open('model data/x_' + file_name_train + '.pkl', 'rb') as f:
@@ -59,9 +62,12 @@ def gnll_loss(y, parameter_vector):
 
     return error
 
-def build_model(x_train, y_train, epochs, batch_size, neurons):
+def build_model(x_train, y_train, epochs, batch_size, neurons, layers, test_name):
     # add custom nnelu function as an activation function
     tf.keras.utils.get_custom_objects().update({'nnelu': Activation(nnelu)})
+
+    filepath = "model tests/current test/" + test_name + "-batch_size" + str(batch_size) + '-neurons' + str(neurons) + '-layers' + str(layers) + '-components' + str(components) + "-{epoch:2d}.hdf5"
+    callback_model = ModelCheckpoint(filepath, monitor='val_loss', verbose=0, save_best_only=False, save_weights_only=False, mode='auto', period=10)
 
     n_samples = x_train.shape[0]
     n_timesteps = x_train.shape[1]
@@ -69,20 +75,49 @@ def build_model(x_train, y_train, epochs, batch_size, neurons):
 
     inputs = Input(shape=(n_timesteps, n_features))
 
-    lstm_1 = LSTM(neurons, activation='relu', kernel_initializer=Orthogonal())
-    # lstm_1 = Dense(neurons, activation='relu')
-    h1 = lstm_1(inputs)
+    if layers == 2:
+        lstm_1 = LSTM(neurons, activation='relu', return_sequences = True, kernel_initializer=Orthogonal())
+        h1 = lstm_1(inputs)
+        lstm_2 = LSTM(neurons, activation='relu', kernel_initializer=Orthogonal())
+        h2 = lstm_2(h1)
+        distribution_input = h2
+    elif layers == 3:
+        lstm_1 = LSTM(neurons, activation='relu', return_sequences = True, kernel_initializer=Orthogonal())
+        h1 = lstm_1(inputs)
+        lstm_2 = LSTM(neurons, activation='relu', return_sequences=True, kernel_initializer=Orthogonal())
+        h2 = lstm_2(h1)
+        lstm_3 = LSTM(neurons, activation='relu', kernel_initializer=Orthogonal())
+        h3 = lstm_3(h2)
+        distribution_input = h3
+    elif layers == 6:
+        lstm_1 = LSTM(neurons, activation='relu', return_sequences = True, kernel_initializer=Orthogonal())
+        h1 = lstm_1(inputs)
+        lstm_2 = LSTM(neurons, activation='relu', return_sequences=True, kernel_initializer=Orthogonal())
+        h2 = lstm_2(h1)
+        lstm_3 = LSTM(neurons, activation='relu', return_sequences=True, kernel_initializer=Orthogonal())
+        h3 = lstm_3(h2)
+        lstm_4 = LSTM(neurons, activation='relu', return_sequences=True, kernel_initializer=Orthogonal())
+        h4 = lstm_4(h3)
+        lstm_5 = LSTM(neurons, activation='relu', return_sequences=True, kernel_initializer=Orthogonal())
+        h5 = lstm_5(h4)
+        lstm_6 = LSTM(neurons, activation='relu', kernel_initializer=Orthogonal())
+        h6 = lstm_6(h5)
+        distribution_input = h6
+    else:
+        lstm_1 = LSTM(neurons, activation='relu', kernel_initializer=Orthogonal())
+        h1 = lstm_1(inputs)
+        distribution_input = h1
 
-    alphas = Dense(components, activation="softmax", name="alphas")(h1)
-    mus = Dense(components*no_dimensions, name="mus")(h1)
-    sigmas = Dense(components*no_dimensions, activation="nnelu", name="sigmas")(h1)
+    alphas = Dense(components, activation="softmax", name="alphas")(distribution_input)
+    mus = Dense(components*no_dimensions, name="mus")(distribution_input)
+    sigmas = Dense(components*no_dimensions, activation="nnelu", name="sigmas")(distribution_input)
     pvector = Concatenate(name="output")([alphas, mus, sigmas])
 
     model = Model(inputs=inputs, outputs=pvector, name="model")
     print(model.summary())
 
     model.compile(loss=gnll_loss, optimizer=Adam())
-    model.fit(x_train, y_train, epochs=epochs, batch_size=batch_size, verbose=1)
+    model.fit(x_train, y_train, epochs=epochs, batch_size=batch_size, verbose=1, callbacks=[callback_model])
 
     return model
 
@@ -159,125 +194,124 @@ def swept_error_area(real_traj, generated_traj):
 
     return total_area
 
-def test_trajectory(folder_name, model, input_shape):
-        onlyfiles = [f for f in listdir(folder_name) if isfile(join(folder_name, f))]
-        # onlyfiles = ['test_2']
-        for file_name in onlyfiles:
-            # get only trajectory file name
-            if 'goal' in file_name:
-                continue
-            if 'point_cloud' in file_name:
-                continue
-            file_name = file_name[0:-4]
-            # import trajectory and environment information
-            traj_df = pd.read_pickle(folder_name + file_name + '.pkl')
-            goal_df = pd.read_pickle(folder_name + file_name + '_goal.pkl')
-            point_cloud_df = pd.read_pickle(folder_name + file_name + '_point_cloud.pkl')
+def test_trajectory(folder_name, model, input_shape, num_tests = 3, plot=True):
+    onlyfiles = [f for f in listdir(folder_name) if isfile(join(folder_name, f))]
+    # onlyfiles = ['test_2']
+    mean_errors = []
+    min_errors = []
+    for file_name in onlyfiles:
+        # get only trajectory file name
+        if 'goal' in file_name:
+            continue
+        if 'point_cloud' in file_name:
+            continue
+        file_name = file_name[0:-4]
+        # import trajectory and environment information
+        traj_df = pd.read_pickle(folder_name + file_name + '.pkl')
+        goal_df = pd.read_pickle(folder_name + file_name + '_goal.pkl')
+        point_cloud_df = pd.read_pickle(folder_name + file_name + '_point_cloud.pkl')
 
-            swept_error_area(traj_df['traj'].values, [[-0.010148664005100727, 0.2371896654367447, 0.8040667772293091],
-                                                      [-0.035649736411869526, 0.20717388950288296, 0.7706105895340443],
-                                                      [-0.06376057211309671, 0.20026960968971252, 0.7584957601502538],
-                                                      [-0.09912641439586878, 0.18019162118434906, 0.7405795166268945],
-                                                      [-0.09966458415146917, 0.11886832118034363, 0.6899319188669324],
-                                                      [-0.06884158251341432, 0.14230557531118393, 0.6528893345966935],
-                                                      [-0.04095121507998556, 0.04624660313129425, 0.6590271648019552],
-                                                      [-0.012194389826618135, -0.022728487849235535,
-                                                       0.6512554995715618],
-                                                      [0.014337816857732832, -0.024133998900651932, 0.6630082409828901],
-                                                      [0.026575917028822005, -0.04136800393462181, 0.6809714715927839],
-                                                      [0.055449640029110014, -0.07100438885390759, 0.6672618836164474],
-                                                      [0.06397608353290707, -0.06987248547375202, 0.7011527009308338],
-                                                      [0.10822953714523464, -0.10554221458733082, 0.7032382795587182],
-                                                      [0.1528710393467918, -0.1082378439605236, 0.6706166164949536],
-                                                      [0.18061221262905747, -0.09485810715705156, 0.6850726818665862],
-                                                      [0.21182763820979744, -0.13104575965553522, 0.7155462997034192]])
+        # convert to usable form
+        point_cloud = []
+        for index, row in point_cloud_df.iterrows():
+            point_cloud.append([row[0], row[1], row[2]])
+        goal = [goal_df.iloc[0, 0], goal_df.iloc[1, 0], goal_df.iloc[2, 0]]
 
-            # convert to usable form
-            point_cloud = []
-            for index, row in point_cloud_df.iterrows():
-                point_cloud.append([row[0], row[1], row[2]])
-            goal = [goal_df.iloc[0, 0], goal_df.iloc[1, 0], goal_df.iloc[2, 0]]
+        point_list = []
+        for i in range(num_tests):
+            current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7], traj_df.iloc[0]['traj'][11]]
+            input_data = np.zeros((1, 20, input_shape[2]))
+            distances = []
+            points = [current_pos]
+            # while True:
+            for i in range(100):
+                # calculate input vector for this timestep
+                input_vector = calulate_input_vector(current_pos, point_cloud, goal)
 
-            point_list = []
-            for i in range(3):
-                current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7], traj_df.iloc[0]['traj'][11]]
-                input_data = np.zeros((1, 20, input_shape[2]))
-                distances = []
-                points = [current_pos]
-                # while True:
-                for i in range(30):
-                    # calculate input vector for this timestep
-                    input_vector = calulate_input_vector(current_pos, point_cloud, goal)
+                # update input vector
+                shape = input_data.shape
+                input_data = np.delete(input_data, [i for i in range(12)])
+                input_data = np.append(input_data, input_vector)
+                input_data = input_data.reshape((shape[0], shape[1], shape[2]))
 
-                    # update input vector
-                    shape = input_data.shape
-                    input_data = np.delete(input_data, [i for i in range(12)])
-                    input_data = np.append(input_data, input_vector)
-                    input_data = input_data.reshape((shape[0], shape[1], shape[2]))
+                # make prediction
+                pred = model.predict(input_data)
+                parameter_vector = pred[0]
 
-                    # make prediction
-                    pred = model.predict(input_data)
-                    parameter_vector = pred[0]
+                # extract sample from generated probability distribution
+                alpha = parameter_vector[0:components]
+                mu = parameter_vector[components:components * (1 + no_dimensions)]
+                mu = tf.reshape(mu, (components, no_dimensions))
+                sigma = parameter_vector[components * (1 + no_dimensions):components * (2 + 2 * no_dimensions)]
+                sigma = tf.reshape(sigma, (components, no_dimensions))
 
-                    # extract sample from generated probability distribution
-                    alpha = parameter_vector[0:components]
-                    mu = parameter_vector[components:components * (1 + no_dimensions)]
-                    mu = tf.reshape(mu, (components, no_dimensions))
-                    sigma = parameter_vector[components * (1 + no_dimensions):components * (2 + 2 * no_dimensions)]
-                    sigma = tf.reshape(sigma, (components, no_dimensions))
+                gm = tfd.MixtureSameFamily(
+                    mixture_distribution=tfd.Categorical(probs=alpha),
+                    components_distribution=tfd.MultivariateNormalDiag(loc=mu,
+                                                                       scale_diag=sigma))
 
-                    gm = tfd.MixtureSameFamily(
-                        mixture_distribution=tfd.Categorical(probs=alpha),
-                        components_distribution=tfd.MultivariateNormalDiag(loc=mu,
-                                                                           scale_diag=sigma))
+                delta_pos = gm.sample([1])[0].numpy()
+                new_pos = np.add(current_pos, delta_pos)
+                print('\n')
+                print(delta_pos)
+                print(current_pos)
+                print(new_pos)
+                print(goal)
 
-                    delta_pos = gm.sample([1])[0].numpy()
-                    new_pos = np.add(current_pos, delta_pos)
-                    print('\n')
-                    print(delta_pos)
-                    print(current_pos)
-                    print(new_pos)
-                    print(goal)
+                dist = np.linalg.norm(np.subtract(new_pos, goal))
+                print(dist)
+                distances.append(dist)
 
-                    dist = np.linalg.norm(np.subtract(new_pos, goal))
-                    print(dist)
-                    distances.append(dist)
+                # restart criteria for a bad run
+                # if np.linalg.norm(delta_pos)>0.2:
+                # if dist > 1.5:
+                #     current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7],
+                #                    traj_df.iloc[0]['traj'][11]]
+                #     points = [current_pos]
+                #     continue
 
-                    # restart criteria for a bad run
-                    # if np.linalg.norm(delta_pos)>0.2:
-                    # if dist > 1.5:
-                    #     current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7],
-                    #                    traj_df.iloc[0]['traj'][11]]
-                    #     points = [current_pos]
-                    #     continue
+                # do not allow excessively large changes in ee pos
+                if np.linalg.norm(delta_pos) > max_movement:
+                    continue
 
-                    # do not allow excessively large changes in ee pos
-                    if np.linalg.norm(delta_pos) > max_movement:
-                        continue
+                current_pos = new_pos
+                points.append(list(current_pos))
 
-                    current_pos = new_pos
-                    points.append(list(current_pos))
+                # termination criteria: distance to goal
+                if dist < stop_distance:
+                    break
 
-                    # termination criteria: distance to goal
-                    if dist < stop_distance:
-                        break
+            point_list.append(points)
 
-                point_list.append(points)
-            # analyse results
-            # plt.figure()
-            # plt.plot(distances)
-
+        # plot the demonstrated trajectories, the goal and the tree
+        if plot:
             fig = plt.figure()
             ax = fig.add_subplot(projection='3d')
             ax.plot([p[0] for p in point_cloud], [p[1] for p in point_cloud],[p[2] for p in point_cloud], 'bo', markersize=2, alpha=0.2)
-            for points in point_list:
-                error = swept_error_area(traj_df['traj'].values, points)
-                ax.plot([p[0] for p in points], [p[1] for p in points], [p[2] for p in points], label=str(error))
             ax.plot([-p[3] for p in traj_df['traj']], [-p[7] for p in traj_df['traj']],
                     [p[11] for p in traj_df['traj']], 'y', linewidth=4, label='demonstration')
             ax.plot([goal[0]], [goal[1]], [goal[2]], 'go')
+
+        # for each generated trajectory, plot and calculate the swept error area
+        errors = []
+        for points in point_list:
+            error = swept_error_area(traj_df['traj'].values, points)
+            errors.append(error)
+            if plot:
+                ax.plot([p[0] for p in points], [p[1] for p in points], [p[2] for p in points], label=str(error))
+        # calculate mean and min errors
+        mean_errors.append(np.mean(errors))
+        min_errors.append(min(errors))
+
+        # show plot
+        if plot:
             plt.legend()
             plt.show()
+
+    print(mean_errors)
+    print(min_errors)
+
+    return mean_errors, min_errors
 
 def train_test_model(data_name):
     ############ train model ###########
@@ -285,9 +319,73 @@ def train_test_model(data_name):
     print(train_x.shape)
     print(train_y.shape)
 
-    model = build_model(train_x, train_y, epochs = 50, batch_size=32, neurons=200)
+    global components
+    components = 8
+
+    model = build_model(train_x, train_y, epochs = 10, batch_size=32, neurons=50, layers=6, test_name='grid_search')
 
     ############ TEST MODEL ##############
-    test_trajectory('trajectory data/', model, train_x.shape)
+    test_trajectory('test trajectories/', model, train_x.shape)
+
+def generate_random_params():
+    batch_range = [8, 32, 128, 256, 512]
+    layer_range = [1,3,6]
+    component_range = [2,4, 8,16]
+    neuron_range = [25,50,100,200,400]
+
+    batch_size = batch_range[randint(0,len(batch_range)-1)]
+    layers = layer_range[randint(0,len(layer_range)-1)]
+    components = component_range[randint(0,len(component_range)-1)]
+    neurons = neuron_range[randint(0,len(neuron_range)-1)]
+
+    return batch_size, neurons, layers, components
+
+def run_grid_search(data_name, test_name):
+    train_x, train_y = read_data(data_name)
+    print(train_x.shape)
+    print(train_y.shape)
+
+    with open('model tests/current test/min_error.csv', mode='w') as file:
+        employee_writer = csv.writer(file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        employee_writer.writerow(
+            ['Batch Size', 'Neurons', 'Components', 'Layers', 'Epoch', 'Traj 1','Traj 2', 'Traj 3', 'Traj 4', 'Traj 5', 'Traj 6'])
+
+    with open('model tests/current test/mean_error.csv', mode='w') as file:
+        employee_writer = csv.writer(file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        employee_writer.writerow(
+            ['Batch Size', 'Neurons', 'Components', 'Layers', 'Epoch', 'Traj 1','Traj 2', 'Traj 3', 'Traj 4', 'Traj 5', 'Traj 6'])
+
+    # generate random models, train and assess error
+    while True:
+        # generate random model params
+        batch_size, neurons, layers, components_local = generate_random_params()
+        print(batch_size, neurons, layers, components_local)
+        global components
+        components = components_local
+
+        # train model
+        model = build_model(train_x, train_y, epochs=100, batch_size=batch_size, neurons=neurons, layers=layers, test_name=test_name)
+
+        for epoch in [10, 25, 50, 75, 100]:
+            # import model and test on test trajectories
+            filepath = "model tests/current test/" + test_name + "-batch_size" + str(batch_size) + '-neurons' + str(neurons) + '-layers' + str(layers) + '-components' + str(components) + "-" + str(epoch) + ".hdf5"
+            model = models.load_model(filepath, custom_objects={'Activation': Activation(nnelu), 'nnelu': Activation(nnelu), 'gnll_loss': gnll_loss})
+            mean_errors, min_errors = test_trajectory('test trajectories/', model, train_x.shape, num_tests=5, plot=False)
+
+            # generate the row to write to file
+            min_error_row = [batch_size, neurons, components, layers, epoch]
+            for err in min_errors:
+                min_error_row.append(err)
+            mean_error_row = [batch_size, neurons, components, layers, epoch]
+            for err in mean_errors:
+                mean_error_row.append(err)
+
+            # write each row to file
+            with open('model tests/current test/min_error.csv', mode='a') as file:
+                employee_writer = csv.writer(file, delimiter=',')
+                employee_writer.writerow(min_error_row)
+            with open('model tests/current test/mean_error.csv', mode='a') as file:
+                employee_writer = csv.writer(file, delimiter=',')
+                employee_writer.writerow(mean_error_row)
 
 
