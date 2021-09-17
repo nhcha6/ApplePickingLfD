@@ -49,6 +49,7 @@ def generate_test_data(file_name, take_every=3):
     point_cloud_df = pd.read_pickle('trajectory data/' + file_name + '_point_cloud.pkl')
 
     point_cloud = []
+    i = 10
     for index, row in point_cloud_df.iterrows():
         point_cloud.append([row[0], row[1], row[2]])
 

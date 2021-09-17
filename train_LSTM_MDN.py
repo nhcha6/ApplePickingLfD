@@ -14,6 +14,7 @@ import pickle
 from create_model_data import *
 from matplotlib import pyplot as plt
 import csv
+import time
 
 no_parameters = 3  # Paramters of the mixture (alpha, mu, sigma)
 no_dimensions = 3  # Dimensions of output distribution (x, y, z)
@@ -67,7 +68,7 @@ def build_model(x_train, y_train, epochs, batch_size, neurons, layers, test_name
     tf.keras.utils.get_custom_objects().update({'nnelu': Activation(nnelu)})
 
     filepath = "model tests/current test/" + test_name + "-batch_size" + str(batch_size) + '-neurons' + str(neurons) + '-layers' + str(layers) + '-components' + str(components) + "-{epoch:2d}.hdf5"
-    callback_model = ModelCheckpoint(filepath, monitor='val_loss', verbose=0, save_best_only=False, save_weights_only=False, mode='auto', period=10)
+    callback_model = ModelCheckpoint(filepath, monitor='val_loss', verbose=0, save_best_only=False, save_weights_only=False, mode='auto', period=5)
 
     n_samples = x_train.shape[0]
     n_timesteps = x_train.shape[1]
@@ -122,6 +123,7 @@ def build_model(x_train, y_train, epochs, batch_size, neurons, layers, test_name
     return model
 
 def calulate_input_vector(ee_pos, point_cloud, goal):
+    prev_time = time.time()
     [repulsive_ee, repulsive_closest] = calculate_weighted_centre(ee_pos, point_cloud, goal, goal_flag=False)
     [repulsive_goal, closest_point] = calculate_weighted_centre(ee_pos, point_cloud, goal, goal_flag=True)
 
@@ -194,16 +196,43 @@ def swept_error_area(real_traj, generated_traj):
 
     return total_area
 
-def test_trajectory(folder_name, model, input_shape, num_tests = 3, plot=True):
+def convert_to_pose(point_list, goal):
+    print(goal)
+    pose_list = []
+    for points in point_list:
+        poses = []
+        for point in points:
+            v1 = np.array([0, 0, np.linalg.norm(np.subtract(goal, point))])
+            v2 = np.array(np.subtract(goal,point))
+            # print(v1)
+            # print(v2)
+            rotation_matrix = rotation_matrix_from_vectors(v1, v2)
+            pose = []
+
+def rotation_matrix_from_vectors(vec1, vec2):
+
+
+    a, b = (vec1 / np.linalg.norm(vec1)).reshape(3), (vec2 / np.linalg.norm(vec2)).reshape(3)
+    v = np.cross(a, b)
+    c = np.dot(a, b)
+    s = np.linalg.norm(v)
+    kmat = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    rotation_matrix = np.eye(3) + kmat + kmat.dot(kmat) * ((1 - c) / (s ** 2))
+    return rotation_matrix
+
+
+def test_trajectory(folder_name, model, input_shape, num_tests = 3, plot=True, save_validation = False):
     onlyfiles = [f for f in listdir(folder_name) if isfile(join(folder_name, f))]
-    # onlyfiles = ['test_2']
     mean_errors = []
     min_errors = []
+    median_errors = []
     for file_name in onlyfiles:
         # get only trajectory file name
         if 'goal' in file_name:
             continue
         if 'point_cloud' in file_name:
+            continue
+        if 'RRT' in file_name:
             continue
         file_name = file_name[0:-4]
         # import trajectory and environment information
@@ -214,16 +243,20 @@ def test_trajectory(folder_name, model, input_shape, num_tests = 3, plot=True):
         # convert to usable form
         point_cloud = []
         for index, row in point_cloud_df.iterrows():
+            if index%10:
+                continue
             point_cloud.append([row[0], row[1], row[2]])
         goal = [goal_df.iloc[0, 0], goal_df.iloc[1, 0], goal_df.iloc[2, 0]]
 
         point_list = []
-        for i in range(num_tests):
+        planning_times = []
+        for j in range(num_tests):
+            start = time.time()
             current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7], traj_df.iloc[0]['traj'][11]]
             input_data = np.zeros((1, 20, input_shape[2]))
             distances = []
+            min_dist = 100
             points = [current_pos]
-            # while True:
             for i in range(100):
                 # calculate input vector for this timestep
                 input_vector = calulate_input_vector(current_pos, point_cloud, goal)
@@ -261,27 +294,47 @@ def test_trajectory(folder_name, model, input_shape, num_tests = 3, plot=True):
                 dist = np.linalg.norm(np.subtract(new_pos, goal))
                 print(dist)
                 distances.append(dist)
+                if dist<min_dist:
+                    min_dist = dist
 
-                # restart criteria for a bad run
-                # if np.linalg.norm(delta_pos)>0.2:
-                # if dist > 1.5:
-                #     current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7],
-                #                    traj_df.iloc[0]['traj'][11]]
-                #     points = [current_pos]
-                #     continue
+                # # restart criteria for a bad run
+                # if i > 30 and dist>1.5:
+                #     break
 
                 # do not allow excessively large changes in ee pos
                 if np.linalg.norm(delta_pos) > max_movement:
                     continue
 
                 current_pos = new_pos
-                points.append(list(current_pos))
+                points.append(new_pos)
 
                 # termination criteria: distance to goal
                 if dist < stop_distance:
                     break
 
-            point_list.append(points)
+                # termination criteria: distance is much greater than the min dist
+                if dist - min_dist > 0.2:
+                    break
+
+            end = time.time()
+            planning_times.append(end - start)
+            min_index = distances.index(min_dist)
+            point_list.append(points[0:min_index+2])
+
+        if save_validation:
+            # print final distances to see if any didn't make it to within 0.35
+            i = 0
+            for point in point_list:
+                print(np.linalg.norm(np.subtract(point[-1], goal)))
+                gen_traj_df = pd.DataFrame(point)
+                gen_traj_df.to_csv('validation results/' + file_name + '_traj_' + str(i) + '.csv', index=False)
+                i+=1
+
+            planning_times_df = pd.DataFrame(data=planning_times)
+            print(planning_times_df)
+            planning_times_df.to_csv('validation results/' + file_name +  '_planning_times.csv', index=False)
+            goal_df.to_csv('validation results/' + file_name +  '_goal_pos.csv', index=False)
+
 
         # plot the demonstrated trajectories, the goal and the tree
         if plot:
@@ -299,36 +352,45 @@ def test_trajectory(folder_name, model, input_shape, num_tests = 3, plot=True):
             errors.append(error)
             if plot:
                 ax.plot([p[0] for p in points], [p[1] for p in points], [p[2] for p in points], label=str(error))
+
         # calculate mean and min errors
         mean_errors.append(np.mean(errors))
         min_errors.append(min(errors))
+        median_errors.append(np.median(errors))
 
         # show plot
         if plot:
             plt.legend()
             plt.show()
 
-    print(mean_errors)
-    print(min_errors)
 
-    return mean_errors, min_errors
+    return mean_errors, min_errors, median_errors
 
-def train_test_model(data_name):
+def train_test_model(data_name, test_data):
     ############ train model ###########
     train_x, train_y = read_data(data_name)
     print(train_x.shape)
     print(train_y.shape)
 
-    global components
-    components = 8
+    # optimal parameters
+    # global components
+    # components = 8
+    # model = build_model(train_x, train_y, epochs = 150, batch_size=32, neurons=100, layers=3, test_name='grid_search')
 
-    model = build_model(train_x, train_y, epochs = 10, batch_size=32, neurons=50, layers=6, test_name='grid_search')
+    # optimal model from grid search
+    global components
+    components = 4
+    filepath = "model tests/Grid Search/grid_search-batch_size16-neurons100-layers6-components4-100.hdf5"
+    # filepath = "model tests/current test/grid_search-batch_size32-neurons100-layers3-components8-150.hdf5"
+    model = models.load_model(filepath, custom_objects={'Activation': Activation(nnelu), 'nnelu': Activation(nnelu),
+                                                        'gnll_loss': gnll_loss})
 
     ############ TEST MODEL ##############
-    test_trajectory('test trajectories/', model, train_x.shape)
+    test_trajectory(test_data, model, train_x.shape, num_tests=10, save_validation=True)
+    # test_trajectory('test trajectories/', model, train_x.shape, num_tests=10, save_validation=True)
 
 def generate_random_params():
-    batch_range = [8, 32, 128, 256, 512]
+    batch_range = [16, 32, 128, 256, 512]
     layer_range = [1,3,6]
     component_range = [2,4, 8,16]
     neuron_range = [25,50,100,200,400]
@@ -340,11 +402,7 @@ def generate_random_params():
 
     return batch_size, neurons, layers, components
 
-def run_grid_search(data_name, test_name):
-    train_x, train_y = read_data(data_name)
-    print(train_x.shape)
-    print(train_y.shape)
-
+def create_error_files():
     with open('model tests/current test/min_error.csv', mode='w') as file:
         employee_writer = csv.writer(file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
         employee_writer.writerow(
@@ -354,6 +412,18 @@ def run_grid_search(data_name, test_name):
         employee_writer = csv.writer(file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
         employee_writer.writerow(
             ['Batch Size', 'Neurons', 'Components', 'Layers', 'Epoch', 'Traj 1','Traj 2', 'Traj 3', 'Traj 4', 'Traj 5', 'Traj 6'])
+
+    with open('model tests/current test/median_error.csv', mode='w') as file:
+        employee_writer = csv.writer(file, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        employee_writer.writerow(
+            ['Batch Size', 'Neurons', 'Components', 'Layers', 'Epoch', 'Traj 1','Traj 2', 'Traj 3', 'Traj 4', 'Traj 5', 'Traj 6'])
+
+def run_grid_search(data_name, test_name):
+    train_x, train_y = read_data(data_name)
+    print(train_x.shape)
+    print(train_y.shape)
+
+    # create_error_files()
 
     # generate random models, train and assess error
     while True:
@@ -366,11 +436,12 @@ def run_grid_search(data_name, test_name):
         # train model
         model = build_model(train_x, train_y, epochs=100, batch_size=batch_size, neurons=neurons, layers=layers, test_name=test_name)
 
+        # iterate through epochs of interest
         for epoch in [10, 25, 50, 75, 100]:
             # import model and test on test trajectories
             filepath = "model tests/current test/" + test_name + "-batch_size" + str(batch_size) + '-neurons' + str(neurons) + '-layers' + str(layers) + '-components' + str(components) + "-" + str(epoch) + ".hdf5"
             model = models.load_model(filepath, custom_objects={'Activation': Activation(nnelu), 'nnelu': Activation(nnelu), 'gnll_loss': gnll_loss})
-            mean_errors, min_errors = test_trajectory('test trajectories/', model, train_x.shape, num_tests=5, plot=False)
+            mean_errors, min_errors, median_errors = test_trajectory('test trajectories/', model, train_x.shape, num_tests=5, plot=False)
 
             # generate the row to write to file
             min_error_row = [batch_size, neurons, components, layers, epoch]
@@ -379,6 +450,9 @@ def run_grid_search(data_name, test_name):
             mean_error_row = [batch_size, neurons, components, layers, epoch]
             for err in mean_errors:
                 mean_error_row.append(err)
+            median_error_row = [batch_size, neurons, components, layers, epoch]
+            for err in median_errors:
+                median_error_row.append(err)
 
             # write each row to file
             with open('model tests/current test/min_error.csv', mode='a') as file:
@@ -387,5 +461,8 @@ def run_grid_search(data_name, test_name):
             with open('model tests/current test/mean_error.csv', mode='a') as file:
                 employee_writer = csv.writer(file, delimiter=',')
                 employee_writer.writerow(mean_error_row)
+            with open('model tests/current test/median_error.csv', mode='a') as file:
+                employee_writer = csv.writer(file, delimiter=',')
+                employee_writer.writerow(median_error_row)
 
 
