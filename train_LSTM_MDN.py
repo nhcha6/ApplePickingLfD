@@ -15,6 +15,8 @@ from create_model_data import *
 from matplotlib import pyplot as plt
 import csv
 import time
+import math
+from validation_analysis import *
 
 no_parameters = 3  # Paramters of the mixture (alpha, mu, sigma)
 no_dimensions = 3  # Dimensions of output distribution (x, y, z)
@@ -366,7 +368,196 @@ def test_trajectory(folder_name, model, input_shape, num_tests = 3, plot=True, s
 
     return mean_errors, min_errors, median_errors
 
-def train_test_model(data_name, test_data):
+def analyse_tasks(folder_name, model_1, model_2, model_1_name, model_2_name, input_shape, num_tests = 3, plot=False):
+    onlyfiles = [f for f in listdir(folder_name) if isfile(join(folder_name, f))]
+
+    approach_vector_dict = {}
+    obstacle_dist_dict = {}
+    for file_name in onlyfiles:
+        # get only trajectory file name
+        if 'goal' in file_name:
+            continue
+        if 'point_cloud' in file_name:
+            continue
+        if 'RRT' in file_name:
+            continue
+
+        file_name = file_name[0:-4]
+
+        approach_vector_dict[file_name] = []
+        obstacle_dist_dict[file_name] = []
+
+        # import trajectory and environment information
+        traj_df = pd.read_pickle(folder_name + file_name + '.pkl')
+        goal_df = pd.read_pickle(folder_name + file_name + '_goal.pkl')
+        point_cloud_df = pd.read_pickle(folder_name + file_name + '_point_cloud.pkl')
+
+        # convert to usable form
+        point_cloud = []
+        for index, row in point_cloud_df.iterrows():
+            if index%10:
+                continue
+            point_cloud.append([row[0], row[1], row[2]])
+        goal = [goal_df.iloc[0, 0], goal_df.iloc[1, 0], goal_df.iloc[2, 0]]
+
+        # start plot
+        if plot:
+            fig = plt.figure()
+            ax = fig.add_subplot(projection='3d')
+            ax.plot([p[0] for p in point_cloud], [p[1] for p in point_cloud], [p[2] for p in point_cloud], 'bo',
+                    markersize=2, alpha=0.2)
+            ax.plot([goal[0]], [goal[1]], [goal[2]], 'go')
+
+            colors = ['r', 'y']
+
+        names = [model_1_name, model_2_name]
+        model_index = 0
+        for model in [model_1, model_2]:
+            point_list = []
+            planning_times = []
+            for j in range(num_tests):
+                start = time.time()
+                current_pos = [-traj_df.iloc[0]['traj'][3], -traj_df.iloc[0]['traj'][7], traj_df.iloc[0]['traj'][11]]
+                input_data = np.zeros((1, 20, input_shape[2]))
+                distances = []
+                min_dist = 100
+                points = [current_pos]
+                for i in range(100):
+                    # calculate input vector for this timestep
+                    input_vector = calulate_input_vector(current_pos, point_cloud, goal)
+
+                    # update input vector
+                    shape = input_data.shape
+                    input_data = np.delete(input_data, [i for i in range(12)])
+                    input_data = np.append(input_data, input_vector)
+                    input_data = input_data.reshape((shape[0], shape[1], shape[2]))
+
+                    # make prediction
+                    pred = model.predict(input_data)
+                    parameter_vector = pred[0]
+
+                    # extract sample from generated probability distribution
+                    alpha = parameter_vector[0:components]
+                    mu = parameter_vector[components:components * (1 + no_dimensions)]
+                    mu = tf.reshape(mu, (components, no_dimensions))
+                    sigma = parameter_vector[components * (1 + no_dimensions):components * (2 + 2 * no_dimensions)]
+                    sigma = tf.reshape(sigma, (components, no_dimensions))
+
+                    gm = tfd.MixtureSameFamily(
+                        mixture_distribution=tfd.Categorical(probs=alpha),
+                        components_distribution=tfd.MultivariateNormalDiag(loc=mu,
+                                                                           scale_diag=sigma))
+
+                    delta_pos = gm.sample([1])[0].numpy()
+                    new_pos = np.add(current_pos, delta_pos)
+                    print('\n')
+                    print(delta_pos)
+                    print(current_pos)
+                    print(new_pos)
+                    print(goal)
+
+                    dist = np.linalg.norm(np.subtract(new_pos, goal))
+                    print(dist)
+                    distances.append(dist)
+                    if dist<min_dist:
+                        min_dist = dist
+
+                    # # restart criteria for a bad run
+                    # if i > 30 and dist>1.5:
+                    #     break
+
+                    # do not allow excessively large changes in ee pos
+                    if np.linalg.norm(delta_pos) > max_movement:
+                        continue
+
+                    current_pos = new_pos
+                    points.append(new_pos)
+
+                    # termination criteria: distance to goal
+                    if dist < stop_distance:
+                        break
+
+                    # termination criteria: distance is much greater than the min dist
+                    if dist - min_dist > 0.2:
+                        break
+
+                end = time.time()
+                planning_times.append(end - start)
+                min_index = distances.index(min_dist)
+                point_list.append(points[0:min_index+2])
+
+            # plot generated trajectory
+            if plot:
+                flag = 1
+                for points in point_list:
+                    if flag:
+                        ax.plot([p[0] for p in points], [p[1] for p in points], [p[2] for p in points], colors[model_index], label=names[model_index])
+                        flag = 0
+                    ax.plot([p[0] for p in points], [p[1] for p in points], [p[2] for p in points], colors[model_index])
+
+            # analyse average approach angle
+            approach_vector = approach_angle(point_list, goal)
+            approach_vector_dict[file_name].append(approach_vector)
+
+            mean_distance_obstacle = collision_distance(point_list, point_cloud)
+            obstacle_dist_dict[file_name].append(mean_distance_obstacle)
+
+            model_index+=1
+
+        if plot:
+            plt.legend()
+            plt.show()
+
+    return approach_vector_dict, obstacle_dist_dict
+
+def approach_angle(point_list, goal):
+    approach_angle = []
+    for points in point_list:
+        approach_vector = np.subtract(goal, points[-1])
+        norm = np.linalg.norm([approach_vector[0], approach_vector[1]])
+        angle = math.atan(approach_vector[2]/norm)
+        angle = angle*180/math.pi
+        approach_angle.append(angle)
+    mean_approach_angle = np.mean(approach_angle)
+    return mean_approach_angle
+
+def collision_distance(point_list, point_cloud):
+    dist_to_obstacle = []
+    for points in point_list:
+        min_dist = 100
+        for point in points:
+            for obstacle in point_cloud:
+                dist = np.linalg.norm(np.subtract(point, obstacle))
+                if dist<min_dist:
+                    min_dist = dist
+            dist_to_obstacle.append(min_dist)
+    return np.mean(dist_to_obstacle)
+
+def compare_task_trajectories(data_name, test_data):
+    train_x, train_y = read_data(data_name)
+    print(train_x.shape)
+    print(train_y.shape)
+
+    # optimal model from grid search
+    global components
+    components = 8
+    filepath = "model tests/aggressive_above-batch_size32-neurons100-layers3-components8-100.hdf5"
+    # filepath = "model tests/Grid Search/grid_search-batch_size16-neurons100-layers6-components4-100.hdf5"
+    model_aggressive_above = models.load_model(filepath, custom_objects={'Activation': Activation(nnelu), 'nnelu': Activation(nnelu),
+                                                        'gnll_loss': gnll_loss})
+    filepath = "model tests/conservative_below-batch_size32-neurons100-layers3-components8-100.hdf5"
+    # filepath = "model tests/Grid Search/grid_search-batch_size16-neurons100-layers6-components4-100.hdf5"
+    model_conservative_below = models.load_model(filepath, custom_objects={'Activation': Activation(nnelu), 'nnelu': Activation(nnelu),
+                                                    'gnll_loss': gnll_loss})
+
+    approach_vector_dict, obstacle_distance_dict = analyse_tasks(test_data, model_aggressive_above, model_conservative_below, 'Task 1', 'Task 2', train_x.shape, num_tests=3, plot=True)
+    print(approach_vector_dict)
+    print(obstacle_distance_dict)
+
+    visualise_task_comparison(approach_vector_dict, obstacle_distance_dict)
+
+
+def train_test_model(data_name, test_data, validation = False):
     ############ train model ###########
     train_x, train_y = read_data(data_name)
     print(train_x.shape)
@@ -375,18 +566,18 @@ def train_test_model(data_name, test_data):
     # optimal parameters
     # global components
     # components = 8
-    # model = build_model(train_x, train_y, epochs = 150, batch_size=32, neurons=100, layers=3, test_name='grid_search')
+    # model = build_model(train_x, train_y, epochs = 100, batch_size=32, neurons=100, layers=3, test_name=data_name)
 
     # optimal model from grid search
     global components
     components = 4
+    # filepath = "model tests/aggressive_below-batch_size32-neurons100-layers3-components8-100.hdf5"
     filepath = "model tests/Grid Search/grid_search-batch_size16-neurons100-layers6-components4-100.hdf5"
-    # filepath = "model tests/current test/grid_search-batch_size32-neurons100-layers3-components8-150.hdf5"
     model = models.load_model(filepath, custom_objects={'Activation': Activation(nnelu), 'nnelu': Activation(nnelu),
                                                         'gnll_loss': gnll_loss})
 
     ############ TEST MODEL ##############
-    test_trajectory(test_data, model, train_x.shape, num_tests=10, save_validation=True)
+    test_trajectory(test_data, model, train_x.shape, num_tests=3, save_validation=validation)
     # test_trajectory('test trajectories/', model, train_x.shape, num_tests=10, save_validation=True)
 
 def generate_random_params():
